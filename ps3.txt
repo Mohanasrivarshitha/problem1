@@ -1,0 +1,181 @@
+import jakarta.persistence.*;
+import lombok.*;
+
+@Entity
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Table(name = "employees")
+public class Employee {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long employeeId;
+
+    private String name;
+    private String department;
+    private String designation;
+
+    private String username;  
+    private String password;  
+
+    private String role;  
+}
+import jakarta.persistence.*;
+import lombok.*;
+import java.time.LocalDate;
+
+@Entity
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Table(name = "attendance")
+public class Attendance {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long attendanceId;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "employee_id")
+    private Employee employee;
+
+    private LocalDate date;
+
+    @Enumerated(EnumType.STRING)
+    private Status status;
+
+    public enum Status {
+        PRESENT,
+        ABSENT
+    }
+}
+import org.springframework.data.jpa.repository.JpaRepository;
+import java.time.LocalDate;
+import java.util.List;
+import java.util.Optional;
+
+public interface EmployeeRepository extends JpaRepository<Employee, Long> {
+    Optional<Employee> findByUsername(String username);
+}
+
+public interface AttendanceRepository extends JpaRepository<Attendance, Long> {
+    Optional<Attendance> findByEmployeeAndDate(Employee employee, LocalDate date);
+    List<Attendance> findByEmployee(Employee employee);
+    List<Attendance> findByEmployee_Department(String department);
+}
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import java.time.LocalDate;
+import java.util.List;
+
+@Service
+public class AttendanceService {
+
+    @Autowired
+    private AttendanceRepository attendanceRepo;
+
+    @Autowired
+    private EmployeeRepository employeeRepo;
+
+    public Attendance markAttendance(Long employeeId, Attendance.Status status) {
+        Employee employee = employeeRepo.findById(employeeId)
+            .orElseThrow(() -> new RuntimeException("Employee not found"));
+
+        LocalDate today = LocalDate.now();
+        attendanceRepo.findByEmployeeAndDate(employee, today).ifPresent(a -> {
+            throw new RuntimeException("Attendance already marked for today");
+        });
+
+        Attendance attendance = new Attendance();
+        attendance.setEmployee(employee);
+        attendance.setDate(today);
+        attendance.setStatus(status);
+
+        return attendanceRepo.save(attendance);
+    }
+
+    public List<Attendance> getAttendanceByEmployee(Long employeeId) {
+        Employee employee = employeeRepo.findById(employeeId)
+            .orElseThrow(() -> new RuntimeException("Employee not found"));
+        return attendanceRepo.findByEmployee(employee);
+    }
+
+    public List<Attendance> getAttendanceByDepartment(String department) {
+        return attendanceRepo.findByEmployee_Department(department);
+    }
+}
+import org.springframework.context.annotation.*;
+import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.core.userdetails.*;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+
+@Configuration
+public class SecurityConfig {
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+
+    @Bean
+    public UserDetailsService userDetailsService(EmployeeRepository employeeRepo) {
+        return username -> employeeRepo.findByUsername(username)
+            .map(employee -> User.builder()
+                .username(employee.getUsername())
+                .password(employee.getPassword())
+                .roles(employee.getRole().replace("ROLE_", ""))
+                .build())
+            .orElseThrow(() -> new UsernameNotFoundException("User not found"));
+    }
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+          .csrf().disable()
+          .authorizeHttpRequests(auth -> auth
+            .requestMatchers("/attendance/mark").hasRole("EMPLOYEE")
+            .requestMatchers("/attendance/reports/**").hasRole("MANAGER")
+            .anyRequest().authenticated()
+          )
+          .httpBasic();
+        return http.build();
+    }
+}
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/attendance")
+public class AttendanceController {
+
+    @Autowired
+    private AttendanceService attendanceService;
+
+    @Autowired
+    private EmployeeRepository employeeRepo;
+    @PostMapping("/mark")
+    public Attendance markAttendance(@RequestParam Attendance.Status status, Authentication auth) {
+        String username = auth.getName();
+        Employee employee = employeeRepo.findByUsername(username)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        return attendanceService.markAttendance(employee.getEmployeeId(), status);
+    }
+    @GetMapping("/my")
+    public List<Attendance> getMyAttendance(Authentication auth) {
+        String username = auth.getName();
+        Employee employee = employeeRepo.findByUsername(username)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        return attendanceService.getAttendanceByEmployee(employee.getEmployeeId());
+    }
+    @GetMapping("/reports/department/{department}")
+    public List<Attendance> getAttendanceByDepartment(@PathVariable String department) {
+        return attendanceService.getAttendanceByDepartment(department);
+    }
+}
