@@ -1,0 +1,191 @@
+spring.datasource.url=jdbc:h2:mem:librarydb
+spring.datasource.driverClassName=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
+spring.h2.console.enabled=true
+spring.jpa.hibernate.ddl-auto=update
+
+@Entity
+public class Book {
+    @Id @GeneratedValue
+    private Long bookId;
+    private String title;
+    private String author;
+    private String category;
+    private boolean available = true; 
+}
+
+@Entity
+public class User {
+    @Id @GeneratedValue
+    private Long userId;
+    private String name;
+    private String membershipType;
+}
+
+@Entity
+public class Transaction {
+    @Id @GeneratedValue
+    private Long transactionId;
+
+    @ManyToOne
+    private Book book;
+
+    @ManyToOne
+    private User user;
+
+    private LocalDate issueDate;
+    private LocalDate returnDate;
+    private String status;
+}
+public interface BookRepository extends JpaRepository<Book, Long> {
+    List<Book> findByTitleContainingIgnoreCase(String title);
+    List<Book> findByAuthorContainingIgnoreCase(String author);
+    List<Book> findByCategoryContainingIgnoreCase(String category);
+}
+
+public interface UserRepository extends JpaRepository<User, Long> {}
+
+public interface TransactionRepository extends JpaRepository<Transaction, Long> {
+    List<Transaction> findByUserUserId(Long userId);
+    List<Transaction> findByStatus(String status);
+    List<Transaction> findByReturnDateBeforeAndStatus(LocalDate date, String status);
+}
+@Service
+public class LibraryService {
+
+    @Autowired
+    private BookRepository bookRepo;
+    @Autowired
+    private UserRepository userRepo;
+    @Autowired
+    private TransactionRepository transRepo;
+    public Book addBook(Book book) {
+        book.setAvailable(true);
+        return bookRepo.save(book);
+    }
+    public void removeBook(Long bookId) {
+        bookRepo.deleteById(bookId);
+    }
+    public User addUser(User user) {
+        return userRepo.save(user);
+    }
+    public void removeUser(Long userId) {
+        userRepo.deleteById(userId);
+    }
+    @Transactional
+    public Transaction lendBook(Long bookId, Long userId) {
+        Book book = bookRepo.findById(bookId).orElseThrow(() -> new RuntimeException("Book not found"));
+        if (!book.isAvailable()) throw new RuntimeException("Book not available");
+
+        User user = userRepo.findById(userId).orElseThrow(() -> new RuntimeException("User not found"));
+
+        book.setAvailable(false);
+        bookRepo.save(book);
+
+        Transaction transaction = new Transaction();
+        transaction.setBook(book);
+        transaction.setUser(user);
+        transaction.setIssueDate(LocalDate.now());
+        transaction.setStatus("ISSUED");
+
+        return transRepo.save(transaction);
+    }
+    @Transactional
+    public Transaction returnBook(Long transactionId) {
+        Transaction transaction = transRepo.findById(transactionId).orElseThrow(() -> new RuntimeException("Transaction not found"));
+
+        if (!"ISSUED".equals(transaction.getStatus())) throw new RuntimeException("Book not issued");
+
+        transaction.setReturnDate(LocalDate.now());
+        transaction.setStatus("RETURNED");
+
+        Book book = transaction.getBook();
+        book.setAvailable(true);
+        bookRepo.save(book);
+
+        return transRepo.save(transaction);
+    }
+    public List<Book> searchBooks(String title, String author, String category) {
+        if (title != null && !title.isEmpty()) return bookRepo.findByTitleContainingIgnoreCase(title);
+        if (author != null && !author.isEmpty()) return bookRepo.findByAuthorContainingIgnoreCase(author);
+        if (category != null && !category.isEmpty()) return bookRepo.findByCategoryContainingIgnoreCase(category);
+        return bookRepo.findAll();
+    }
+    public List<Transaction> getOverdueBooks() {
+        LocalDate today = LocalDate.now();
+        return transRepo.findByReturnDateBeforeAndStatus(today, "ISSUED");
+    }
+    public List<Transaction> getUserHistory(Long userId) {
+        return transRepo.findByUserUserId(userId);
+    }
+}
+@RestController
+@RequestMapping("/api")
+public class LibraryController {
+
+    @Autowired
+    private LibraryService libraryService;
+    @PostMapping("/books")
+    public Book addBook(@RequestBody Book book) {
+        return libraryService.addBook(book);
+    }
+    @DeleteMapping("/books/{id}")
+    public void removeBook(@PathVariable Long id) {
+        libraryService.removeBook(id);
+    }
+    @PostMapping("/users")
+    public User addUser(@RequestBody User user) {
+        return libraryService.addUser(user);
+    }
+    @DeleteMapping("/users/{id}")
+    public void removeUser(@PathVariable Long id) {
+        libraryService.removeUser(id);
+    }
+    @PostMapping("/lend")
+    public Transaction lendBook(@RequestParam Long bookId, @RequestParam Long userId) {
+        return libraryService.lendBook(bookId, userId);
+    }
+    @PostMapping("/return")
+    public Transaction returnBook(@RequestParam Long transactionId) {
+        return libraryService.returnBook(transactionId);
+    }
+    @GetMapping("/books/search")
+    public List<Book> searchBooks(
+        @RequestParam(required = false) String title,
+        @RequestParam(required = false) String author,
+        @RequestParam(required = false) String category) {
+        return libraryService.searchBooks(title, author, category);
+    }
+    @GetMapping("/reports/overdue")
+    public List<Transaction> getOverdueBooks() {
+        return libraryService.getOverdueBooks();
+    }
+    @GetMapping("/reports/user-history/{userId}")
+    public List<Transaction> getUserHistory(@PathVariable Long userId) {
+        return libraryService.getUserHistory(userId);
+    }
+}
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig extends WebSecurityConfigurerAdapter {
+
+    @Override
+    protected void configure(HttpSecurity http) throws Exception {
+        http
+          .csrf().disable()
+          .authorizeRequests()
+          .antMatchers("/api/**").authenticated()
+          .and()
+          .httpBasic();
+    }
+
+    @Override
+    protected void configure(AuthenticationManagerBuilder auth) throws Exception {
+        auth.inMemoryAuthentication()
+            .withUser("librarian")
+            .password("{noop}password")
+            .roles("LIBRARIAN");
+    }
+}
