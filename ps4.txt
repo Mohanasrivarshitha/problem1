@@ -1,0 +1,224 @@
+spring.datasource.url=jdbc:mysql://localhost:3306/ecommerce_db?useSSL=false&serverTimezone=UTC
+spring.datasource.username=your_mysql_user
+spring.datasource.password=your_mysql_password
+
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+import jakarta.persistence.*;
+import jakarta.validation.constraints.*;
+import lombok.*;
+
+@Entity
+@Table(name = "products")
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class Product {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long productId;
+
+    @NotBlank(message = "Product name is mandatory")
+    private String name;
+
+    private String description;
+
+    @NotNull
+    @DecimalMin(value = "0.0", inclusive = false, message = "Price must be positive")
+    private Double price;
+
+    @NotBlank(message = "Category is mandatory")
+    private String category;
+
+    @NotNull
+    @Min(value = 0, message = "Stock quantity must be non-negative")
+    private Integer stockQuantity;
+}
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+
+import java.util.List;
+
+public interface ProductRepository extends JpaRepository<Product, Long> {
+
+    List<Product> findByNameContainingIgnoreCase(String name);
+    List<Product> findByCategoryIgnoreCase(String category);
+    List<Product> findByPriceBetween(Double minPrice, Double maxPrice);
+    @Query("SELECT p FROM Product p WHERE (:category IS NULL OR LOWER(p.category) = LOWER(:category)) AND p.price BETWEEN :minPrice AND :maxPrice")
+    List<Product> filterProducts(@Param("category") String category,
+                                 @Param("minPrice") Double minPrice,
+                                 @Param("maxPrice") Double maxPrice);
+}
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
+
+@Service
+@Transactional
+public class ProductService {
+
+    @Autowired
+    private ProductRepository productRepo;
+
+    public Product addProduct(Product product) {
+        return productRepo.save(product);
+    }
+
+    public Product updateProduct(Long id, Product updatedProduct) {
+        Product product = productRepo.findById(id)
+            .orElseThrow(() -> new RuntimeException("Product not found"));
+        
+        product.setName(updatedProduct.getName());
+        product.setDescription(updatedProduct.getDescription());
+        product.setPrice(updatedProduct.getPrice());
+        product.setCategory(updatedProduct.getCategory());
+        product.setStockQuantity(updatedProduct.getStockQuantity());
+
+        return productRepo.save(product);
+    }
+
+    public void deleteProduct(Long id) {
+        productRepo.deleteById(id);
+    }
+
+    public Product getProduct(Long id) {
+        return productRepo.findById(id)
+                .orElseThrow(() -> new RuntimeException("Product not found"));
+    }
+
+    public List<Product> getAllProducts() {
+        return productRepo.findAll();
+    }
+
+    public List<Product> searchByName(String name) {
+        return productRepo.findByNameContainingIgnoreCase(name);
+    }
+
+    public List<Product> filterByCategory(String category) {
+        return productRepo.findByCategoryIgnoreCase(category);
+    }
+
+    public List<Product> filterByPriceRange(Double minPrice, Double maxPrice) {
+        return productRepo.findByPriceBetween(minPrice, maxPrice);
+    }
+
+    public List<Product> filterProducts(String category, Double minPrice, Double maxPrice) {
+        if (minPrice == null) minPrice = 0.0;
+        if (maxPrice == null) maxPrice = Double.MAX_VALUE;
+        return productRepo.filterProducts(category, minPrice, maxPrice);
+    }
+}
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.ResponseEntity;
+import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.*;
+
+import jakarta.validation.Valid;
+import java.util.List;
+
+@RestController
+@RequestMapping("/api/products")
+@Validated
+public class ProductController {
+
+    @Autowired
+    private ProductService productService;
+
+    @PostMapping
+    public ResponseEntity<Product> addProduct(@Valid @RequestBody Product product) {
+        Product saved = productService.addProduct(product);
+        return ResponseEntity.status(201).body(saved);
+    }
+
+    @PutMapping("/{id}")
+    public ResponseEntity<Product> updateProduct(@PathVariable Long id, @Valid @RequestBody Product product) {
+        Product updated = productService.updateProduct(id, product);
+        return ResponseEntity.ok(updated);
+    }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Void> deleteProduct(@PathVariable Long id) {
+        productService.deleteProduct(id);
+        return ResponseEntity.noContent().build();
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<Product> getProduct(@PathVariable Long id) {
+        Product product = productService.getProduct(id);
+        return ResponseEntity.ok(product);
+    }
+
+    @GetMapping
+    public ResponseEntity<List<Product>> listProducts(
+            @RequestParam(required = false) String category,
+            @RequestParam(required = false) Double minPrice,
+            @RequestParam(required = false) Double maxPrice,
+            @RequestParam(required = false) String search
+    ) {
+        List<Product> products;
+
+        if (search != null && !search.isEmpty()) {
+            products = productService.searchByName(search);
+        } else if (category != null || minPrice != null || maxPrice != null) {
+            products = productService.filterProducts(category, minPrice, maxPrice);
+        } else {
+            products = productService.getAllProducts();
+        }
+
+        return ResponseEntity.ok(products);
+    }
+}
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    @ExceptionHandler(RuntimeException.class)
+    public ResponseEntity<String> handleNotFound(RuntimeException ex) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ex.getMessage());
+    }
+
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<String> handleValidationError(MethodArgumentNotValidException ex) {
+        String errorMsg = ex.getBindingResult().getFieldErrors()
+                .stream()
+                .map(fe -> fe.getField() + ": " + fe.getDefaultMessage())
+                .findFirst()
+                .orElse("Invalid input");
+        return ResponseEntity.badRequest().body(errorMsg);
+    }
+}
+import org.springframework.context.annotation.*;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+
+@Configuration
+public class SecurityConfig {
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+            .csrf().disable()
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/api/products/**").hasAnyRole("ADMIN", "USER")
+                .anyRequest().authenticated()
+            )
+            .httpBasic();
+        return http.build();
+    }
+}
+
+
